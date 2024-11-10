@@ -1,0 +1,317 @@
+---
+title: "Food_Inspections_LexBrunett"
+author: "Lex Miguel Brunett Chavez"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Food Inspections Report
+
+This information is derived from inspections of restaurants and other food establishments in Chicago from January 1, 2010 to the present. Inspections are performed by staff from the Chicago Department of Public Health’s Food Protection Program using a standardized procedure. The results of the inspection are inputted into a database, then reviewed and approved by a State of Illinois Licensed Environmental Health Practitioner (LEHP). For descriptions of the data elements included in this set, please click here.
+
+Note about 7/1/2018 change to food inspection procedures that affects the data in this dataset: http://bit.ly/2yWd2JB
+
+Disclaimer: Attempts have been made to minimize any and all duplicate inspection reports. However, the dataset may still contain such duplicates and the appropriate precautions should be exercised when viewing or analyzing these data. The result of the inspections (pass, pass with conditions or fail) as well as the violations noted are based on the findings identified and reported by the inspector at the time of the inspection, and may not reflect the findings noted at other times. For more information about Food Inspections, go to https://www.chicago.gov/city/en/depts/cdph/provdrs/food_safety.html.
+
+```{r DatasetsSetup, echo=FALSE}
+
+packages_to_install <- c(
+  "stats", "shiny", "rpart", "party", "randomForest", "class",
+  "tidyverse", "sf", "spdep", "lubridate", "leaflet", "ggmap",
+  "caret", "ggplot2", "anytime", "conflicted", "ggrepel",
+  "dplyr", "ggthemes", "leaflet", "nnet", "viridis", "fields"
+)
+
+
+install_and_load <- function(package) {
+  if (!requireNamespace(package, quietly = TRUE)) {
+    install.packages(package, dependencies = TRUE)
+    library(package, character.only = TRUE)
+  }
+}
+
+lapply(packages_to_install, install_and_load)
+
+food <- read.csv("Final_Food.csv")
+
+food_inspection <- food %>%
+  group_by(Inspection.ID,License..) %>%
+  summarise(
+    facility_type = first(Facility.Type),
+    number_of_violations = sum(str_count(Violations, "\\d{1,2}\\.\\s"))
+  ) %>%
+  ungroup()
+food_license <- food %>%
+  group_by(License..) %>%
+  summarise(
+    number_of_inspections = n(),
+    number_failed = sum(Results == "Fail"),
+    percent_failed = (number_failed / number_of_inspections) * 100,
+    last_inspection_result = {
+      ordered_results <- Results[order(as.Date(Inspection.Date, format = "%m/%d/%Y"), decreasing = TRUE)]
+      last_valid_result <- ordered_results[which(!ordered_results %in% c("Out of Business", "No Entry"))[1]]
+      last_valid_result
+    },
+    currently_open = ifelse(all(Results != "Out of Business"), "Yes", "No")
+  )
+
+merge_inspections <- left_join(food_inspection, food_license, by = "License..")
+update_merge <- merge_inspections %>%
+  select(-License.., -facility_type)
+food_upgrade <- left_join(food, update_merge, by = "Inspection.ID")
+
+food_upgrade <- na.omit(food_upgrade)
+food_upgrade$Violations <- ifelse(food_upgrade$Violations == "", "None", food_upgrade$Violations)
+food_upgrade <- food_upgrade[rowSums(food_upgrade == "") == 0, ]
+
+desired_values <- c("Pass", "Pass w/ Conditions", "Fail")
+food_upgrade_2 <- food_upgrade[food_upgrade$Results %in% desired_values, ]
+
+food_upgrade_model <- food_upgrade_2
+food_upgrade_model$Results <- as.factor(food_upgrade_model$Results)
+food_upgrade_model <- na.omit(food_upgrade_model)
+
+food_upgrade_model <- food_upgrade_model[rowSums(food_upgrade_model == "") == 0, ]
+
+food_upgrade_model
+
+
+
+```
+
+## Data Set's variables description
+
+Inspection.ID = Identification of the inspection in the stablishment
+
+DBA.Name
+
+AKA.Name
+
+License..
+
+Facility.Type
+
+Risk
+
+Address
+
+City
+
+State
+
+Zip
+
+Inspection.Date
+
+Inspection.Type
+
+Results
+
+Violations
+
+Latitude
+
+Longitude
+
+Location
+
+
+
+
+```{r QuestionStringDataSampling}
+
+
+
+food_upgrade_model <- food_upgrade_model[food_upgrade_model$Latitude != 0 & food_upgrade_model$Longitude != 0, ]
+
+na_counts <- colSums(is.na(food_upgrade_model))
+print(na_counts)
+#columnas_a_filtrar <- c("Results")
+#valores_unicos <- lapply(food_upgrade_model[columnas_a_filtrar], unique)
+
+str(food_upgrade_model)
+
+set.seed(123)
+sampled_data_FoodInspections <- food_upgrade_model
+
+```
+
+Note that the `echo = FALSE` parameter was added to the code chunk to prevent printing of the R code that generated the plot.
+
+```{r ColumnsName_FoodInspections}
+
+colnames(sampled_data_FoodInspections)
+#View(sampled_data_FoodInspections)
+
+valores_unicos_risk <- unique(sampled_data_FoodInspections$Facility.Type)
+print("************")
+print("")
+valores_unicos_risk
+
+```
+
+
+
+```{r AddingVariables}
+
+library(dplyr)
+sampled_data_FoodInspections <- sampled_data_FoodInspections %>%
+  arrange(License.., Inspection.Date)
+
+sampled_data_FoodInspections <- sampled_data_FoodInspections %>%
+  group_by(License..) %>%
+  mutate(did_ever_fail = any(Results == "Fail"))
+
+sampled_data_FoodInspections <- sampled_data_FoodInspections %>%
+  group_by(License..) %>%
+  mutate(num_failures_in_past = cumsum(Results == "Fail"))
+
+#View(sampled_data_FoodInspections)
+
+sampled_data_FoodInspections
+
+```
+
+
+```{r SpatialDistribution}
+
+library(ggplot2)
+library(dplyr)
+library(leaflet)
+
+map_clusters <- sampled_data_FoodInspections %>%
+  leaflet() %>%
+  addTiles() %>%
+  addMarkers(clusterOptions = markerClusterOptions(),
+             popup = ~paste("DBA: ", DBA.Name, "<br>Inspection ID: ", Inspection.ID,
+                            "<br>Results: ", Results, "<br>License: ", License..))
+
+map_clusters
+
+
+```
+
+```{r SpatialDistributionproportions}
+
+ggplot(sampled_data_FoodInspections, aes(x = Results, fill = Results)) +
+  geom_bar() +
+  scale_fill_manual(values = c("Pass" = "green", "Fail" = "red", "Pass w/ Conditions" = "yellow")) +
+  labs(title = "Results in Inspections",
+       x = "Result",
+       y = "Inspections Qty") +
+  theme_minimal()
+
+ #The bar graph shows that about 100,000 establishments passed the health inspections, while about 30,000 passed with conditions, and finally around 37,000 establishments failed. Meaning that about a 40% of the establishments did not comply with the conditions necessary to pass the inspections performed by the Chicago Department of Public Health’s Food Protection.
+```
+
+```{r SpatialDistribution?Risk}
+
+library(ggplot2)
+
+# Definir colores basados en las categorías de riesgo
+colores_risk <- c("Risk 1 (High)" = "red",
+                  "Risk 2 (Medium)" = "yellow",
+                  "Risk 3 (Low)" = "green",
+                  "All" = "blue")  # Color para "All" o cualquier otra categoría
+
+# Crear el gráfico de barras para Risk
+ggplot(sampled_data_FoodInspections, aes(x = Risk, fill = Risk)) +
+  geom_bar() +
+  scale_fill_manual(values = colores_risk) +
+  labs(title = "Risk in Inspections",
+       x = "Risk Category",
+       y = "Inspections Qty") +
+  theme_minimal()
+
+
+
+#It is determined through the graph that within the city of Chicago there are about 150,000 establishments with a high risk of failing health inspections, and about 30,000 with medium risk, these values represent an important risk factor for the health of consumers. For a deeper understanding, the risk areas are studied throught a map to determine wich areas of Chicago are under higher risks. 
+```
+
+```{r ZipCodeMap}
+
+library(dplyr)
+library(leaflet)
+
+proporcion_promedio_por_zip <- sampled_data_FoodInspections %>%
+  group_by(Zip) %>%
+  summarize(
+    total_establecimientos = n(),
+    fail_prop = mean(Results == "Fail"),
+    pass_prop = mean(Results == "Pass"),
+    conditions_prop = mean(Results == "Pass w/ Conditions"),
+    avg_latitude = mean(Latitude),
+    avg_longitude = mean(Longitude),
+    high_risk_prop = mean(Risk == "Risk 1 (High)"),
+    medium_risk_prop = mean(Risk == "Risk 2 (Medium)"),
+    low_risk_prop = mean(Risk == "Risk 3 (Low)"),
+    max_risk = which.max(c(high_risk_prop, medium_risk_prop, low_risk_prop)),
+    risk_color = case_when(
+      max_risk == 1 ~ "red",
+      max_risk == 2 ~ "yellow",
+      max_risk == 3 ~ "green",
+      TRUE ~ "gray"  # En caso de empate o error
+    )
+  )
+
+valores_unicos_risk <- unique(sampled_data_FoodInspections$Risk)
+
+mapa_proporciones_promedio <- proporcion_promedio_por_zip %>%
+  leaflet() %>%
+  addProviderTiles("CartoDB.Positron") %>%
+  addCircleMarkers(
+    ~avg_longitude, ~avg_latitude,
+    radius = 8,
+    fillColor = ~risk_color,
+    fillOpacity = 0.8,
+    popup = ~paste("<b>Zip:</b>", Zip, "<br>",
+                   "<b>Total Establishments:</b>", total_establecimientos, "<br>",
+                   "<b>Fail:</b>", scales::percent(fail_prop), "<br>",
+                   "<b>Pass:</b>", scales::percent(pass_prop), "<br>",
+                   "<b>Pass w/ Conditions:</b>", scales::percent(conditions_prop), "<br>",
+                   "<b>High Risk:</b>", scales::percent(high_risk_prop), "<br>",
+                   "<b>Medium Risk:</b>", scales::percent(medium_risk_prop), "<br>",
+                   "<b>Low Risk:</b>", scales::percent(low_risk_prop)),
+    label = ~paste(Zip)
+  )
+
+mapa_proporciones_promedio
+
+
+#The map below represents, using 3 colors, the risk of failing health inspections for establishments within the limits of Chicago City. The color red represents the highest risk, yellow represents medium risk, and green represents low risk. Based on this color code, it is determined that there is a high risk of failing health inspections throughout the entire city, with exceptions highlighted in the downtown area where 4 establishments in the South Westside with ID 60502 and 1 between Bridgeport Chinatown and Near South show show a low risk. And in the southern part of the city, were 25 establishments belonging to ID 60827 in the Far South Westside show a medium level of risk.
+
+
+```
+
+```{r Top10Zipcodes}
+
+library(ggplot2)
+
+# Filtrar los top 10 zipcodes con mayor cantidad de establecimientos
+top_10_zipcodes <- head(proporcion_promedio_por_zip[order(-proporcion_promedio_por_zip$total_establecimientos),], 10)
+
+# Crear un gráfico de barras
+ggplot(top_10_zipcodes, aes(x = reorder(Zip, -total_establecimientos), y = total_establecimientos, fill = fail_prop)) +
+  geom_bar(stat = "identity", position = "dodge") +
+  scale_fill_gradient(low = "green", high = "red") +  # Colores para fail_prop
+  labs(title = "Top 10 Zipcodes with more stablishments",
+       x = "Zipcode",
+       y = "Total Establishments",
+       fill = "Fail Proportion") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust = 1))
+
+
+```
+
+
+
+
+
+
+
+

@@ -1,0 +1,298 @@
+---
+title: "RestuarantFails"
+output: html_document
+date: "2024-02-16"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+
+#install.packages("dplyr")
+#install.packages("stringr")
+
+library(dplyr)
+library(stringr)
+```
+
+
+```{r}
+food <- read.csv("Final_Food.csv")
+
+food
+```
+
+```{r}
+food_inspection <- food %>%
+  group_by(Inspection.ID,License..) %>%
+  summarise(
+    facility_type = first(Facility.Type),
+    number_of_violations = sum(str_count(Violations, "\\d{1,2}\\.\\s"))
+  ) %>%
+  ungroup()
+food_license <- food %>%
+  group_by(License..) %>%
+  summarise(
+    number_of_inspections = n(),
+    number_failed = sum(Results == "Fail"),
+    percent_failed = (number_failed / number_of_inspections) * 100,
+    last_inspection_result = {
+      ordered_results <- Results[order(as.Date(Inspection.Date, format = "%m/%d/%Y"), decreasing = TRUE)]
+      last_valid_result <- ordered_results[which(!ordered_results %in% c("Out of Business", "No Entry"))[1]]
+      last_valid_result
+    },
+    currently_open = ifelse(all(Results != "Out of Business"), "Yes", "No")
+  )
+
+```
+
+```{r}
+merge_inspections <- left_join(food_inspection, food_license, by = "License..")
+update_merge <- merge_inspections %>%
+  select(-License.., -facility_type)
+food_upgrade <- left_join(food, update_merge, by = "Inspection.ID")
+```
+
+```{r}
+food_upgrade <- na.omit(food_upgrade)
+food_upgrade$Violations <- ifelse(food_upgrade$Violations == "", "None", food_upgrade$Violations)
+food_upgrade <- food_upgrade[rowSums(food_upgrade == "") == 0, ]
+```
+
+```{r}
+desired_values <- c("Pass", "Pass w/ Conditions", "Fail")
+food_upgrade_2 <- food_upgrade[food_upgrade$Results %in% desired_values, ]
+```
+
+```{r}
+
+#install.packages("randomForest")
+#install.packages("caret")
+#install.packages("ROSE")
+#install.packages("smotefamily")
+library(smotefamily)
+library(ROSE)
+library(randomForest)
+library(caret)
+
+food_upgrade_2
+```
+
+```{r}
+food_upgrade_model <- food_upgrade_2
+food_upgrade_model$Results <- as.factor(food_upgrade_model$Results)
+food_upgrade_model <- na.omit(food_upgrade_model)
+
+food_upgrade_model <- food_upgrade_model[rowSums(food_upgrade_model == "") == 0, ]
+```
+
+```{r}
+
+
+variables_desired <- c("Risk","Zip","Inspection.Type","Results","number_of_violations","number_of_inspections","number_failed","last_inspection_result")
+
+#colnames(food_upgrade_model)
+
+food_upgrade_model <- food_upgrade_model[, variables_desired]
+
+# Ver estructura de los datos
+str(food_upgrade_model)
+
+# Ver balance de clases en la variable objetivo
+table(food_upgrade_model$Results)
+
+
+
+```
+
+
+```{r}
+
+set.seed(123)
+ind <- sample(2, nrow(food_upgrade_model), replace = TRUE, prob = c(0.7, 0.3))
+train <- food_upgrade_model[ind==1,]
+test <- food_upgrade_model[ind==2,]
+
+# Training
+rf <- randomForest(Results ~ ., data = train, proximity = FALSE, na.action = na.omit, mtry = 5, ntree = 5000)
+
+# Printing the model
+print(rf)
+
+```
+
+
+
+
+```{r}
+# Predicción en el conjunto de prueba
+predictions <- predict(rf, newdata = test)
+
+# Matriz de confusión
+confusionMatrix <- table(predictions, test$Results)
+print(confusionMatrix)
+
+# Tasa de error
+error_rate <- mean(predictions != test$Results)
+print(error_rate)
+```
+
+
+
+
+```{r}
+plot(rf)
+importance(rf)
+varImpPlot(rf,sort = T,n.var = 12,main = "Top  - Variable Importance")
+```
+
+```{r}
+
+x <- food_upgrade_model
+y <- food_upgrade_model$Results
+
+#x <- food_upgrade_model[, c("Results","number_of_violations","percent_failed","Zip")]
+
+#y <- food_upgrade_model$Results
+
+#variables_desired <- c("Results","number_of_violations","percent_failed","Zip",)
+
+#food_upgrade_model <- food_upgrade_model[, variables_desired]
+
+
+```
+
+
+```{r}
+set.seed(123)
+bestMtry <- tuneRF(x,y, stepFactor = 1, improve = 1e-5, ntree = 3000)
+
+set.seed(123)
+bestMtry <- tuneRF(x,y, stepFactor = 1, improve = 1e-5, ntree = 3500)
+
+set.seed(123)
+bestMtry <- tuneRF(x,y, stepFactor = 1, improve = 1e-5, ntree = 4000)
+
+set.seed(123)
+bestMtry <- tuneRF(x,y, stepFactor = 1, improve = 1e-5, ntree = 4500)
+
+set.seed(123)
+bestMtry <- tuneRF(x,y, stepFactor = 1, improve = 1e-5, ntree = 5000)
+```
+
+
+
+```{r}
+
+#Extent Caret
+customRF <- list(type = "Classification", library = "randomForest", loop = NULL)
+customRF$parameters <- data.frame(parameter = c("mtry", "ntree"), class = rep("numeric", 2), label = c("mtry", "ntree"))
+customRF$grid <- function(x, y, len = NULL, search = "grid") {}
+customRF$fit <- function(x, y, wts, param, lev, last, weights, classProbs, ...) {
+  randomForest(x, y, mtry = param$mtry, ntree=param$ntree, ...)
+}
+customRF$predict <- function(modelFit, newdata, preProc = NULL, submodels = NULL)
+   predict(modelFit, newdata)
+customRF$prob <- function(modelFit, newdata, preProc = NULL, submodels = NULL)
+   predict(modelFit, newdata, type = "prob")
+customRF$sort <- function(x) x[order(x[,1]),]
+customRF$levels <- function(x) x$classes
+
+train <- food_upgrade_model[ind==1,]
+test <- food_upgrade_model[ind==2,]
+
+# train model
+control <- trainControl(method="repeatedcv", number=10, repeats=3)
+tunegrid <- expand.grid(.mtry=c(sqrt(ncol(x)), 3, 4, 5, 6), .ntree=c(4800,5000,5500,6000,6500))
+metric <- "Accuracy"
+
+# Train the model using the train function from caret
+#model <- train(Results ~ Inspection.ID + DBA.Name + AKA.Name + License.. + Risk + Address + Zip + Inspection.Date + Inspection.Type + Violations + Latitude + Longitude + Location + Community.Areas + number_of_violations + #number_of_inspections + number_failed + percent_failed, data=food_upgrade_model,
+#               method = "rf",           # Random forest method
+#               trControl = ctrl,        # Control parameters
+#               tuneGrid = param_grid)  # Grid of hyperparameters to search over
+
+model <- train(Results~., data=train, method=customRF, metric=metric, tuneGrid=tunegrid, trControl=control)
+
+summary(model)
+plot(model)
+
+```
+
+
+
+
+```{r}
+
+
+#Ten Variables
+#Extent Caret
+customRF <- list(type = "Classification", library = "randomForest", loop = NULL)
+customRF$parameters <- data.frame(parameter = c("mtry", "ntree"), class = rep("numeric", 2), label = c("mtry", "ntree"))
+customRF$grid <- function(x, y, len = NULL, search = "grid") {}
+customRF$fit <- function(x, y, wts, param, lev, last, weights, classProbs, ...) {
+  randomForest(x, y, mtry = param$mtry, ntree=param$ntree, ...)
+}
+customRF$predict <- function(modelFit, newdata, preProc = NULL, submodels = NULL)
+   predict(modelFit, newdata)
+customRF$prob <- function(modelFit, newdata, preProc = NULL, submodels = NULL)
+   predict(modelFit, newdata, type = "prob")
+customRF$sort <- function(x) x[order(x[,1]),]
+customRF$levels <- function(x) x$classes
+
+train <- food_upgrade_model[ind==1,]
+test <- food_upgrade_model[ind==2,]
+
+# train model
+control <- trainControl(method="repeatedcv", number=10, repeats=3)
+tunegrid <- expand.grid(.mtry=c(sqrt(ncol(x)), 3, 4, 5, 6), .ntree=c(4500,5000,5500))
+metric <- "Accuracy"
+
+# Train the model using the train function from caret
+#model <- train(Results ~ Inspection.ID + DBA.Name + AKA.Name + License.. + Risk + Address + Zip + Inspection.Date + Inspection.Type + Violations + Latitude + Longitude + Location + Community.Areas + number_of_violations + #number_of_inspections + number_failed + percent_failed, data=food_upgrade_model,
+#               method = "rf",           # Random forest method
+#               trControl = ctrl,        # Control parameters
+#               tuneGrid = param_grid)  # Grid of hyperparameters to search over
+
+model <- train(Results~., data=train, method=customRF, metric=metric, tuneGrid=tunegrid, trControl=control)
+
+summary(model)
+plot(model)
+
+```
+
+```{r}
+
+# Create model with default paramters
+# train model
+control <- trainControl(method="repeatedcv", number=10, repeats=3)
+tunegrid <- expand.grid(.mtry=c(sqrt(ncol(x)), 3, 4, 5, 6), .ntree=c(4500,5000,5500))
+metric <- "Accuracy"
+seed <- 7
+metric <- "Accuracy"
+set.seed(seed)
+mtry <- sqrt(ncol(x))
+tunegrid <- expand.grid(.mtry=mtry)
+rf_default <- train(Results~., data=train, method="rf", metric=metric, tuneGrid=tunegrid, trControl=control)
+print(rf_default)
+
+# Manual Search
+control <- trainControl(method="repeatedcv", number=10, repeats=3, search="grid")
+tunegrid <- expand.grid(.mtry=c(sqrt(ncol(x)), 3, 4, 5, 6))
+modellist <- list()
+for (ntree in c(3000,3500,4000,4500,5000)) {
+	set.seed(seed)
+	fit <- train(Results~., data=train, method="rf", metric=metric, tuneGrid=tunegrid, trControl=control, ntree=ntree)
+	key <- toString(ntree)
+	modellist[[key]] <- fit
+}
+# compare results
+results <- resamples(modellist)
+summary(results)
+dotplot(results)
+
+```
+
+
